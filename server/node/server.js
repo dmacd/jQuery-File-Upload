@@ -6,6 +6,8 @@
  * Copyright 2012, Sebastian Tschan
  * https://blueimp.net
  *
+ * Extennsibility modifications by Daniel MacDonald
+ *
  * Licensed under the MIT license:
  * http://www.opensource.org/licenses/MIT
  */
@@ -13,15 +15,18 @@
 /*jslint nomen: true, regexp: true, unparam: true, stupid: true */
 /*global require, __dirname, unescape, console */
 
-(function (port) {
+
+
     'use strict';
     var path = require('path'),
         fs = require('fs'),
         // Since Node 0.8, .existsSync() moved from path to fs:
         _existsSync = fs.existsSync || path.existsSync,
-        formidable = require('formidable'),
+
         nodeStatic = require('node-static'),
         imageMagick = require('imagemagick'),
+        formidable = require('formidable'),
+
         options = {
             tmpDir: __dirname + '/tmp',
             publicDir: __dirname + '/public',
@@ -74,7 +79,7 @@
             this.res = res;
             this.callback = callback;
         },
-        serve = function (req, res) {
+        serve = function (req, res, response_callback) {
             res.setHeader(
                 'Access-Control-Allow-Origin',
                 options.accessControl.allowOrigin
@@ -93,12 +98,23 @@
                         });
                         res.end();
                     } else {
-                        res.writeHead(200, {
-                            'Content-Type': req.headers.accept
-                                .indexOf('application/json') !== -1 ?
-                                        'application/json' : 'text/plain'
+                        /*
+                           call success handler here to commit files to DB if they exist in the upload directory
+                           the DB needs to know which document it is attaching to:
+                           - could have the client prepend the id --> but then have to check permissions on it
+                           - could have the client send it in the query params --> still have to check permissions...should be better as it wont expose to '/'s in the filenames
+                           - TODO: a couch-attacher module which
+                        */
+                        response_callback(req, res, result, function()
+                        {
+                            res.writeHead(200, {
+                                'Content-Type': req.headers.accept
+                                    .indexOf('application/json') !== -1 ?
+                                            'application/json' : 'text/plain'
+                            });
+                            res.end(JSON.stringify(result));
                         });
-                        res.end(JSON.stringify(result));
+
                     }
                 },
                 setNoCacheHeaders = function () {
@@ -136,6 +152,7 @@
                 res.end();
             }
         };
+
     fileServer.respond = function (pathname, status, _headers, files, stat, req, res, finish) {
         if (!options.safeFileTypes.test(files[0])) {
             // Force a download dialog for unsafe file extensions:
@@ -211,7 +228,8 @@
             map = {},
             counter = 1,
             redirect,
-            finish = function () {
+            finish = function (err, stdout, stderr/*djm: add some error reporting*/) {
+                console.log("UploadHandler.finish: " + JSON.stringify({ counter: counter, err: err, stdout: stdout, stderr: stderr }));
                 counter -= 1;
                 if (!counter) {
                     files.forEach(function (fileInfo) {
@@ -220,18 +238,27 @@
                     handler.callback(files, redirect);
                 }
             };
+        /* DJM */ console.log('UploadHandler.post:' + JSON.stringify(form));
         form.uploadDir = options.tmpDir;
         form.on('fileBegin', function (name, file) {
+
+            /* DJM */ console.log('UploadHandler.post:form.fileBegin...');
+
             tmpFiles.push(file.path);
             var fileInfo = new FileInfo(file, handler.req, true);
             fileInfo.safeName();
             map[path.basename(file.path)] = fileInfo;
             files.push(fileInfo);
+
+            /* DJM */ console.log('UploadHandler.post:form.fileBegin' + JSON.stringify(file));
         }).on('field', function (name, value) {
-            if (name === 'redirect') {
+                /* DJM */ console.log('UploadHandler.post:form.field...');
+
+                if (name === 'redirect') {
                 redirect = value;
             }
         }).on('file', function (name, file) {
+                /* DJM */ console.log('UploadHandler.post:form.file...');
             var fileInfo = map[path.basename(file.path)];
             fileInfo.size = file.size;
             if (!fileInfo.validate()) {
@@ -253,12 +280,15 @@
                 });
             }
         }).on('aborted', function () {
+                /* DJM */ console.log('UploadHandler.post:form.aborted...');
             tmpFiles.forEach(function (file) {
                 fs.unlink(file);
             });
         }).on('error', function (e) {
+                /* DJM */ console.log('UploadHandler.post:form.error...');
             console.log(e);
         }).on('progress', function (bytesReceived, bytesExpected) {
+                /* DJM */ console.log('UploadHandler.post:form.progress...');
             if (bytesReceived > options.maxPostSize) {
                 handler.req.connection.destroy();
             }
@@ -279,9 +309,32 @@
             handler.callback(false);
         }
     };
-    if (options.ssl) {
-        require('https').createServer(options.ssl, serve).listen(port);
-    } else {
-        require('http').createServer(serve).listen(port);
-    }
-}(8888));
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Exported interface
+
+exports.options = options;
+
+/**
+ * @description The serving portion of the upload handler
+ * @param {req} req    port number to listen on
+ * @param {res} res    port number to listen on*
+ * @param {function} response_callback(req, res, results, finish) callback called just before issuing response to client.
+ *              The finish parameter sends the response, which is just to stringify the contents of result.
+ *              Results contains a list of fileInfo objects in the case of GET and POST requests.
+ */
+exports.serve = serve;
+
+
+
+exports.listen  = function (port)
+    {
+
+        if (options.ssl) {
+            require('https').createServer(options.ssl, serve).listen(port);
+        } else {
+            require('http').createServer(serve).listen(port);
+        }
+    };
+//};
